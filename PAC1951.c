@@ -21,7 +21,7 @@ static bool				PAC1951_isValidAlertSource		(PAC1951_AlertSource event);
 
 
 // General Purpose helpers
-static void				PAC1951_delay_ms					(uint32_t delay_ms);
+static void				PAC1951_sleep_ms					(uint32_t delay_ms);
 static PAC1951_Status	PAC1951_readDeviceId				(PAC1951_Object *dev, PAC1951_DeviceId *id);
 
 // Read and conversion functions for PAC1951 measuremnts
@@ -544,7 +544,7 @@ PAC1951_Status PAC1951_refresh(PAC1951_Object *dev) {
     PAC1951_Status status = PAC1951_sendCommand(dev, PAC1951_REG_REFRESH);
 
     if(status == PAC1951_STATUS_OK) {
-        PAC1951_delay_ms(PAC1951_REFRESH_DELAY_MS);
+        PAC1951_sleep_ms(PAC1951_REFRESH_DELAY_MS);
 		dev->accumulationValid = PAC1951_isSampleModeAdaptive(dev->sampleMode);
     }
 
@@ -555,7 +555,7 @@ PAC1951_Status PAC1951_refreshV (PAC1951_Object *dev) {
     PAC1951_Status status = PAC1951_sendCommand(dev, PAC1951_REG_REFRESH_V);
 
     if(status == PAC1951_STATUS_OK) {
-        PAC1951_delay_ms(PAC1951_REFRESH_DELAY_MS);
+        PAC1951_sleep_ms(PAC1951_REFRESH_DELAY_MS);
     }
 
     return status;
@@ -690,7 +690,7 @@ static PAC1951_Status PAC1951_checkOpen (PAC1951_Object *dev) {
 	return PAC1951_STATUS_OK;
 }
 
-static void PAC1951_delay_ms(uint32_t delay_ms) {
+static void PAC1951_sleep_ms(uint32_t delay_ms) {
     uint32_t ticks;
 
     if(delay_ms == 0U) {

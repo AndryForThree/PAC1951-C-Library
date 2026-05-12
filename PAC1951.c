@@ -18,11 +18,15 @@ static bool				PAC1951_isValidAccumulatorMode	(PAC1951_AccumulatorMode mode);
 static bool				PAC1951_isValidAlertPinMode		(PAC1951_AlertPinMode mode);
 static bool				PAC1951_isValidAlertPin			(PAC1951_AlertPin pin);
 static bool				PAC1951_isValidAlertSource		(PAC1951_AlertSource event);
+static bool				PAC1951_isValidAlertSampleCount	(PAC1951_AlertSampleCount sampleCount);
 
 
 // General Purpose helpers
 static void				PAC1951_sleep_ms					(uint32_t delay_ms);
 static PAC1951_Status	PAC1951_readDeviceId				(PAC1951_Object *dev, PAC1951_DeviceId *id);
+static PAC1951_Status	PAC1951_getAlertSourceMask			(PAC1951_AlertSource alertSource, uint32_t *sourceMask);
+static PAC1951_Status	PAC1951_getAlertThresholdRegister	(PAC1951_AlertSource alertSource, uint8_t *reg, bool *isPowerLimit);
+static PAC1951_Status	PAC1951_getAlertSampleCountRegister(PAC1951_AlertSource alertSource, uint8_t *reg);
 
 // Read and conversion functions for PAC1951 measuremnts
 static PAC1951_Status	PAC1951_readRaw_vBus				(PAC1951_Object *dev, bool useAverage, uint16_t *raw);
@@ -34,6 +38,9 @@ static PAC1951_Status	PAC1951_readRaw_accumulator			(PAC1951_Object *dev, int64_
 static int32_t			PAC1951_convertRaw_vBus_mV			(PAC1951_Object *dev, uint16_t rawVbus);
 static int32_t			PAC1951_convertRaw_vSense_uV		(PAC1951_Object *dev, uint16_t rawVsense);
 static int64_t			PAC1951_convertRaw_power_mW			(PAC1951_Object *dev, int64_t rawPower);
+static PAC1951_Status	PAC1951_convertAlertThreshold16		(PAC1951_Range range, int32_t threshold, int32_t fullScale, uint16_t *rawThreshold);
+static PAC1951_Status	PAC1951_convertAlertCurrentThreshold(PAC1951_Object *dev, int32_t threshold_mA, uint16_t *rawThreshold);
+static PAC1951_Status	PAC1951_convertAlertPowerThreshold	(PAC1951_Object *dev, int32_t threshold_mW, uint32_t *rawThreshold);
 
 // Read functions with typed output (to simplify the read/write, without the use of array of bytes)
 static PAC1951_Status 	PAC1951_readU8						(PAC1951_Object *dev, uint8_t reg, uint8_t *value);
@@ -356,8 +363,6 @@ PAC1951_Status PAC1951_setAlertPinMode(PAC1951_Object *dev, PAC1951_AlertPin ale
 PAC1951_Status PAC1951_setAlertSource(PAC1951_Object *dev, PAC1951_AlertSource alertSource, bool enable) {
 	uint32_t enableMask;
 	uint32_t sourceMask;
-	uint8_t sourceBit;
-	uint8_t sourceOffset;
 	PAC1951_Status status;
 
 	// Sanity check on the input parameters
@@ -369,15 +374,10 @@ PAC1951_Status PAC1951_setAlertSource(PAC1951_Object *dev, PAC1951_AlertSource a
 		return PAC1951_STATUS_INVALID_ARGUMENT;
 	}
 
-	// Calculate the real register bit that corresponds to the selected alert source.
-	if(alertSource <= PAC1951_ALERT_EVENT_CH1_OVER_POWER) {
-		sourceBit = PAC1951_ALERT_CH1_SOURCE_BASE_BIT - (PAC1951_ALERT_CH1_SOURCE_BIT_STEP * (uint8_t)alertSource);
+	status = PAC1951_getAlertSourceMask(alertSource, &sourceMask);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
 	}
-	else {
-		sourceOffset = (uint8_t)alertSource - (uint8_t)PAC1951_ALERT_EVENT_ACC_OVERFLOW;
-		sourceBit = PAC1951_ALERT_SYSTEM_SOURCE_BASE_BIT - (PAC1951_ALERT_SYSTEM_SOURCE_BIT_STEP * sourceOffset);
-	}
-	sourceMask = (uint32_t)(1UL << sourceBit);
 
 	// Read the current global alert source enable mask.
 	status = PAC1951_readU24(dev, PAC1951_REG_ALERT_ENABLE, &enableMask);
@@ -406,8 +406,6 @@ PAC1951_Status PAC1951_setAlertSource(PAC1951_Object *dev, PAC1951_AlertSource a
 PAC1951_Status PAC1951_setAlertRouting(PAC1951_Object *dev, PAC1951_AlertPin alertPin, PAC1951_AlertSource alertSource, bool enable) {
 	uint32_t alertMask;
 	uint32_t sourceMask;
-	uint8_t sourceBit;
-	uint8_t sourceOffset;
 	uint8_t alertReg;
 	PAC1951_Status status;
 
@@ -420,15 +418,10 @@ PAC1951_Status PAC1951_setAlertRouting(PAC1951_Object *dev, PAC1951_AlertPin ale
 		return PAC1951_STATUS_INVALID_ARGUMENT;
 	}
 
-	// Calculate the real register bit that corresponds to the selected alert source.
-	if(alertSource <= PAC1951_ALERT_EVENT_CH1_OVER_POWER) {
-		sourceBit = PAC1951_ALERT_CH1_SOURCE_BASE_BIT - (PAC1951_ALERT_CH1_SOURCE_BIT_STEP * (uint8_t)alertSource);
+	status = PAC1951_getAlertSourceMask(alertSource, &sourceMask);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
 	}
-	else {
-		sourceOffset = (uint8_t)alertSource - (uint8_t)PAC1951_ALERT_EVENT_ACC_OVERFLOW;
-		sourceBit = PAC1951_ALERT_SYSTEM_SOURCE_BASE_BIT - (PAC1951_ALERT_SYSTEM_SOURCE_BIT_STEP * sourceOffset);
-	}
-	sourceMask = (uint32_t)(1UL << sourceBit);
 
 	// ALERT1 and ALERT2 routing registers are consecutive, so the pin enum is used as the register offset.
 	// ALERT1 --> SLOW_ALERT1 register, ALERT2 --> GPIO_ALERT2 register.
@@ -455,6 +448,152 @@ PAC1951_Status PAC1951_setAlertRouting(PAC1951_Object *dev, PAC1951_AlertPin ale
 	}
 
 	// Apply the new alert routing without clearing the accumulation registers.
+	return PAC1951_refreshV(dev);
+}
+
+PAC1951_Status PAC1951_setAlertThreshold(PAC1951_Object *dev, PAC1951_AlertSource alertSource, int32_t threshold) {
+	uint32_t enableMask;
+	uint32_t sourceMask;
+	uint32_t rawPowerThreshold;
+	uint16_t rawThreshold;
+	uint8_t thresholdReg;
+	bool isPowerLimit;
+	bool restoreAlertEnable;
+	PAC1951_Status status;
+	PAC1951_Status restoreStatus;
+
+	// Sanity check on the input parameters
+	status = PAC1951_checkOpen(dev);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
+	status = PAC1951_getAlertThresholdRegister(alertSource, &thresholdReg, &isPowerLimit);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
+	switch(alertSource) {
+		case PAC1951_ALERT_EVENT_CH1_OVER_CURRENT:
+		case PAC1951_ALERT_EVENT_CH1_UNDER_CURRENT:
+			status = PAC1951_convertAlertCurrentThreshold(dev, threshold, &rawThreshold);
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_OVER_VOLTAGE:
+		case PAC1951_ALERT_EVENT_CH1_UNDER_VOLTAGE:
+			status = PAC1951_convertAlertThreshold16(dev->vbusRange, threshold, PAC1951_VBUS_FSR_MV, &rawThreshold);
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_OVER_POWER:
+			status = PAC1951_convertAlertPowerThreshold(dev, threshold, &rawPowerThreshold);
+			break;
+
+		default:
+			status = PAC1951_STATUS_INVALID_ARGUMENT;
+			break;
+	}
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
+	status = PAC1951_getAlertSourceMask(alertSource, &sourceMask);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
+	status = PAC1951_readU24(dev, PAC1951_REG_ALERT_ENABLE, &enableMask);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
+	restoreAlertEnable = ((enableMask & sourceMask) != 0U);
+	if(restoreAlertEnable) {
+		status = PAC1951_writeU24(dev, PAC1951_REG_ALERT_ENABLE, enableMask & ~sourceMask);
+		if(status != PAC1951_STATUS_OK) {
+			return status;
+		}
+	}
+
+	if(isPowerLimit) {
+		status = PAC1951_writeU24(dev, thresholdReg, rawPowerThreshold);
+	}
+	else {
+		status = PAC1951_writeU16(dev, thresholdReg, rawThreshold);
+	}
+
+	if(restoreAlertEnable) {
+		restoreStatus = PAC1951_writeU24(dev, PAC1951_REG_ALERT_ENABLE, enableMask);
+		if(status == PAC1951_STATUS_OK) {
+			status = restoreStatus;
+		}
+	}
+
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
+	return PAC1951_refreshV(dev);
+}
+
+PAC1951_Status PAC1951_setAlertSampleCount(PAC1951_Object *dev, PAC1951_AlertSource alertSource, PAC1951_AlertSampleCount sampleCount) {
+	uint32_t enableMask;
+	uint32_t sourceMask;
+	uint8_t sampleReg;
+	uint8_t regValue;
+	bool restoreAlertEnable;
+	PAC1951_Status status;
+	PAC1951_Status restoreStatus;
+
+	// Sanity check on the input parameters
+	status = PAC1951_checkOpen(dev);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+	if(!PAC1951_isValidAlertSampleCount(sampleCount)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	status = PAC1951_getAlertSampleCountRegister(alertSource, &sampleReg);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
+	status = PAC1951_getAlertSourceMask(alertSource, &sourceMask);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
+	status = PAC1951_readU24(dev, PAC1951_REG_ALERT_ENABLE, &enableMask);
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
+	restoreAlertEnable = ((enableMask & sourceMask) != 0U);
+	if(restoreAlertEnable) {
+		status = PAC1951_writeU24(dev, PAC1951_REG_ALERT_ENABLE, enableMask & ~sourceMask);
+		if(status != PAC1951_STATUS_OK) {
+			return status;
+		}
+	}
+
+	status = PAC1951_readU8(dev, sampleReg, &regValue);
+	if(status == PAC1951_STATUS_OK) {
+		regValue &= (uint8_t)~(PAC1951_ALERT_NSAMPLES_FIELD_MASK << PAC1951_ALERT_NSAMPLES_CH1_SHIFT);
+		regValue |= (uint8_t)(((uint8_t)sampleCount & PAC1951_ALERT_NSAMPLES_FIELD_MASK) << PAC1951_ALERT_NSAMPLES_CH1_SHIFT);
+		status = PAC1951_writeU8(dev, sampleReg, regValue);
+	}
+
+	if(restoreAlertEnable) {
+		restoreStatus = PAC1951_writeU24(dev, PAC1951_REG_ALERT_ENABLE, enableMask);
+		if(status == PAC1951_STATUS_OK) {
+			status = restoreStatus;
+		}
+	}
+
+	if(status != PAC1951_STATUS_OK) {
+		return status;
+	}
+
 	return PAC1951_refreshV(dev);
 }
 
@@ -672,6 +811,103 @@ static bool PAC1951_isValidAlertPin(PAC1951_AlertPin pin) {
 
 static bool PAC1951_isValidAlertSource(PAC1951_AlertSource event) {
 	return (event < PAC1951_ALERT_EVENT_COUNT);
+}
+
+static bool PAC1951_isValidAlertSampleCount(PAC1951_AlertSampleCount sampleCount) {
+	return (sampleCount < PAC1951_ALERT_NSAMPLES_COUNT);
+}
+
+static PAC1951_Status PAC1951_getAlertSourceMask(PAC1951_AlertSource alertSource, uint32_t *sourceMask) {
+	uint8_t sourceBit;
+	uint8_t sourceOffset;
+
+	if(sourceMask == NULL) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+	if(!PAC1951_isValidAlertSource(alertSource)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	// Calculate the real register bit that corresponds to the selected alert source.
+	if(alertSource <= PAC1951_ALERT_EVENT_CH1_OVER_POWER) {
+		sourceBit = PAC1951_ALERT_CH1_SOURCE_BASE_BIT - (PAC1951_ALERT_CH1_SOURCE_BIT_STEP * (uint8_t)alertSource);
+	}
+	else {
+		sourceOffset = (uint8_t)alertSource - (uint8_t)PAC1951_ALERT_EVENT_ACC_OVERFLOW;
+		sourceBit = PAC1951_ALERT_SYSTEM_SOURCE_BASE_BIT - (PAC1951_ALERT_SYSTEM_SOURCE_BIT_STEP * sourceOffset);
+	}
+
+	*sourceMask = (uint32_t)(1UL << sourceBit);
+	return PAC1951_STATUS_OK;
+}
+
+static PAC1951_Status PAC1951_getAlertThresholdRegister(PAC1951_AlertSource alertSource, uint8_t *reg, bool *isPowerLimit) {
+	if((reg == NULL) || (isPowerLimit == NULL)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	*isPowerLimit = false;
+
+	switch(alertSource) {
+		case PAC1951_ALERT_EVENT_CH1_OVER_CURRENT:
+			*reg = PAC1951_REG_OC_LIM_CH1;
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_UNDER_CURRENT:
+			*reg = PAC1951_REG_UC_LIM_CH1;
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_OVER_VOLTAGE:
+			*reg = PAC1951_REG_OV_LIM_CH1;
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_UNDER_VOLTAGE:
+			*reg = PAC1951_REG_UV_LIM_CH1;
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_OVER_POWER:
+			*reg = PAC1951_REG_OP_LIM_CH1;
+			*isPowerLimit = true;
+			break;
+
+		default:
+			return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	return PAC1951_STATUS_OK;
+}
+
+static PAC1951_Status PAC1951_getAlertSampleCountRegister(PAC1951_AlertSource alertSource, uint8_t *reg) {
+	if(reg == NULL) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	switch(alertSource) {
+		case PAC1951_ALERT_EVENT_CH1_OVER_CURRENT:
+			*reg = PAC1951_REG_OC_LIM_NSAMPLES;
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_UNDER_CURRENT:
+			*reg = PAC1951_REG_UC_LIM_NSAMPLES;
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_OVER_VOLTAGE:
+			*reg = PAC1951_REG_OV_LIM_NSAMPLES;
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_UNDER_VOLTAGE:
+			*reg = PAC1951_REG_UV_LIM_NSAMPLES;
+			break;
+
+		case PAC1951_ALERT_EVENT_CH1_OVER_POWER:
+			*reg = PAC1951_REG_OP_LIM_NSAMPLES;
+			break;
+
+		default:
+			return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	return PAC1951_STATUS_OK;
 }
 
 static PAC1951_Status PAC1951_checkOpen (PAC1951_Object *dev) {
@@ -966,6 +1202,123 @@ static int64_t PAC1951_convertRaw_power_mW(PAC1951_Object *dev, int64_t rawPower
 
 	powerFsr_mW = (vbusFsr_mV * vsenseFsr_uV) / (int64_t)dev->senseResistorUohm;
 	return (rawPower * powerFsr_mW) / denominator;
+}
+
+static PAC1951_Status PAC1951_convertAlertThreshold16(PAC1951_Range range, int32_t threshold, int32_t fullScale, uint16_t *rawThreshold) {
+	int64_t rawValue;
+	int64_t minRaw;
+	int64_t maxRaw;
+	int64_t denominator;
+
+	if((rawThreshold == NULL) || (fullScale <= 0)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	switch(range) {
+		case PAC1951_RANGE_UNIPOLAR_FSR:
+			if(threshold < 0) {
+				return PAC1951_STATUS_INVALID_ARGUMENT;
+			}
+			denominator = PAC1951_RAW_16_UNIPOLAR_DEN;
+			minRaw = 0;
+			maxRaw = 0xFFFF;
+			break;
+
+		case PAC1951_RANGE_BIPOLAR_FSR:
+			denominator = PAC1951_RAW_16_BIPOLAR_DEN;
+			minRaw = -32768;
+			maxRaw = 32767;
+			break;
+
+		case PAC1951_RANGE_BIPOLAR_HALF_FSR:
+			denominator = PAC1951_RAW_16_UNIPOLAR_DEN;
+			minRaw = -32768;
+			maxRaw = 32767;
+			break;
+
+		default:
+			return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	rawValue = ((int64_t)threshold * denominator) / fullScale;
+	if((rawValue < minRaw) || (rawValue > maxRaw)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	if(range == PAC1951_RANGE_UNIPOLAR_FSR) {
+		*rawThreshold = (uint16_t)rawValue;
+	}
+	else {
+		*rawThreshold = (uint16_t)((int16_t)rawValue);
+	}
+
+	return PAC1951_STATUS_OK;
+}
+
+static PAC1951_Status PAC1951_convertAlertCurrentThreshold(PAC1951_Object *dev, int32_t threshold_mA, uint16_t *rawThreshold) {
+	int64_t threshold_uV;
+
+	if((dev == NULL) || (rawThreshold == NULL)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+	if(dev->senseResistorUohm == 0U) {
+		return PAC1951_STATUS_CONFIG_ERROR;
+	}
+
+	threshold_uV = ((int64_t)threshold_mA * (int64_t)dev->senseResistorUohm) / 1000L;
+	if((threshold_uV < -2147483648LL) || (threshold_uV > 2147483647LL)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	return PAC1951_convertAlertThreshold16(dev->vsenseRange, (int32_t)threshold_uV, PAC1951_VSENSE_FSR_UV, rawThreshold);
+}
+
+static PAC1951_Status PAC1951_convertAlertPowerThreshold(PAC1951_Object *dev, int32_t threshold_mW, uint32_t *rawThreshold) {
+	int64_t denominator;
+	int64_t powerFsr_mW;
+	int64_t rawPower;
+	int64_t rawLimitMax;
+	int64_t vbusFsr_mV = PAC1951_VBUS_FSR_MV;
+	int64_t vsenseFsr_uV = PAC1951_VSENSE_FSR_UV;
+	bool signedPower;
+
+	if((dev == NULL) || (rawThreshold == NULL)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+	if((dev->senseResistorUohm == 0U) || (threshold_mW < 0)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	if(dev->vbusRange == PAC1951_RANGE_BIPOLAR_HALF_FSR) {
+		vbusFsr_mV /= 2;
+	}
+	if(dev->vsenseRange == PAC1951_RANGE_BIPOLAR_HALF_FSR) {
+		vsenseFsr_uV /= 2;
+	}
+
+	powerFsr_mW = (vbusFsr_mV * vsenseFsr_uV) / (int64_t)dev->senseResistorUohm;
+	if(powerFsr_mW <= 0) {
+		return PAC1951_STATUS_CONFIG_ERROR;
+	}
+
+	signedPower = (dev->vbusRange != PAC1951_RANGE_UNIPOLAR_FSR) || (dev->vsenseRange != PAC1951_RANGE_UNIPOLAR_FSR);
+	if(signedPower) {
+		denominator = PAC1951_RAW_30_BIPOLAR_DEN;
+		rawLimitMax = 0x1FFFFFFFLL;
+	}
+	else {
+		denominator = PAC1951_RAW_30_UNIPOLAR_DEN;
+		rawLimitMax = 0x3FFFFFFFLL;
+	}
+
+	rawPower = ((int64_t)threshold_mW * denominator) / powerFsr_mW;
+	if((rawPower < 0) || (rawPower > rawLimitMax)) {
+		return PAC1951_STATUS_INVALID_ARGUMENT;
+	}
+
+	// The OP limit register stores the upper 24 bits of the 30-bit VPOWER value.
+	*rawThreshold = (uint32_t)(rawPower >> 6);
+	return PAC1951_STATUS_OK;
 }
 
 

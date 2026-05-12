@@ -179,6 +179,10 @@ extern "C" {
 #define PAC1951_ALERT_SYSTEM_SOURCE_BASE_BIT	3U	// Bit position of the first system alert source
 #define PAC1951_ALERT_SYSTEM_SOURCE_BIT_STEP	1U	// Distance between system alert source bits
 
+// ALERT NSAMPLES register settings
+#define PAC1951_ALERT_NSAMPLES_CH1_SHIFT		6U		// Position of the channel 1 field inside each NSAMPLES register
+#define PAC1951_ALERT_NSAMPLES_FIELD_MASK		0x03U	// Mask for one channel NSAMPLES field
+
 // ================================================================================================
 // SMBUS_CFG register settings
 // ============================================================================================== */
@@ -270,6 +274,14 @@ typedef enum {
 	PAC1951_ALERT_EVENT_COUNT						// Number of valid alert events
 } PAC1951_AlertSource;
 
+typedef enum {
+	PAC1951_ALERT_NSAMPLES_1	= 0,	// Trigger alert after 1 sample over threshold
+	PAC1951_ALERT_NSAMPLES_4	= 1,	// Trigger alert after 4 consecutive samples over threshold
+	PAC1951_ALERT_NSAMPLES_8	= 2,	// Trigger alert after 8 consecutive samples over threshold
+	PAC1951_ALERT_NSAMPLES_16	= 3,	// Trigger alert after 16 consecutive samples over threshold
+	PAC1951_ALERT_NSAMPLES_COUNT		// Number of valid alert sample count options
+} PAC1951_AlertSampleCount;
+
 // Settings used before opening the PAC1951 driver
 typedef struct {
     uint8_t productId;
@@ -326,6 +338,10 @@ PAC1951_Status PAC1951_setActiveChannels	(PAC1951_Object *dev, uint16_t channelM
 PAC1951_Status PAC1951_setAlertPinMode		(PAC1951_Object *dev, PAC1951_AlertPin alertPin, PAC1951_AlertPinMode pinMode);
 PAC1951_Status PAC1951_setAlertSource		(PAC1951_Object *dev, PAC1951_AlertSource alertSource, bool enable);
 PAC1951_Status PAC1951_setAlertRouting		(PAC1951_Object *dev, PAC1951_AlertPin alertPin, PAC1951_AlertSource alertSource, bool enable);
+// threshold units depend on alertSource:
+// OC/UC: mA, OV/UV: mV, OP: mW positive magnitude.
+PAC1951_Status PAC1951_setAlertThreshold	(PAC1951_Object *dev, PAC1951_AlertSource alertSource, int32_t threshold);
+PAC1951_Status PAC1951_setAlertSampleCount	(PAC1951_Object *dev, PAC1951_AlertSource alertSource, PAC1951_AlertSampleCount sampleCount);
 
 // Read measurements from the PAC1951
 PAC1951_Status PAC1951_readMeasurement		(PAC1951_Object *dev, bool useAverage, PAC1951_Measurement *measurement);
